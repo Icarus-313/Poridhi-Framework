@@ -1,0 +1,185 @@
+import os
+from wsgiref.simple_server import make_server
+from urllib.parse import parse_qs
+import mimetypes
+
+class Request:
+    def __init__(self, environ):
+        self.method = environ['REQUEST_METHOD']
+        self.path = environ.get('PATH_INFO', '/')
+        self.query = parse_qs(environ.get('QUERY_STRING', ''))
+        self.headers = self._parse_headers(environ)
+        self.environ = environ
+        self.body = self._get_body(environ)
+
+    def _parse_headers(self, environ):
+        headers = {}
+        for key, value in environ.items():
+            if key.startswith('HTTP_'):
+                header_name = key[5:].replace('_', '-').title()
+                headers[header_name] = value
+        return headers
+
+    def _get_body(self, environ):
+        try:
+            length = int(environ.get('CONTENT_LENGTH', 0))
+        except (ValueError, TypeError):
+            length = 0
+        if length > 0:
+            return environ['wsgi.input'].read(length)
+        return b''
+
+class Response:
+    def __init__(self, body='', status=200, headers=None):
+        self.body = body.encode('utf-8') if isinstance(body, str) else body
+        self.status = status
+        self.headers = headers or {}
+
+    def set_header(self, key, value):
+        self.headers[key] = value
+
+    def get_status_string(self):
+        status_codes = {
+            200: '200 OK',
+            404: '404 Not Found',
+            500: '500 Internal Server Error',
+        }
+        return status_codes.get(self.status, f'{self.status} Unknown Status')
+
+class Middleware:
+    def __init__(self, app):
+        self.app = app
+
+    def __call__(self, environ, start_response):
+        request = Request(environ)
+        self.process_request(request)
+        response = self.app(environ, start_response)
+        return response
+
+    def process_request(self, request):
+        # Example middleware: simple logging
+        print(f"[Middleware] {request.method} {request.path}")
+
+class StaticFramework:
+    def __init__(self):
+        self.routes = {}
+        self.middlewares = []
+        self.templates_dir = os.path.join(os.getcwd(), 'templates')
+        self.static_dir = os.path.join(os.getcwd(), 'static')
+
+    def route(self, path, methods=['GET']):
+        def decorator(func):
+            self.routes[(path, tuple(methods))] = func
+            return func
+        return decorator
+
+    def add_middleware(self, middleware_cls):
+        self.middlewares.append(middleware_cls)
+
+    def render_template(self, template_name, context=None):
+        context = context or {}
+        template_path = os.path.join(self.templates_dir, template_name)
+        if not os.path.exists(template_path):
+            return f"<h1>Template {template_name} not found</h1>"
+        with open(template_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        for key, value in context.items():
+            content = content.replace(f'{{{{ {key} }}}}', str(value))
+        return content
+
+    def serve_static(self, path):
+        file_path = os.path.join(self.static_dir, path.lstrip('/'))
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            return Response('<h1>404 Not Found</h1>', status=404, headers={'Content-Type': 'text/html'})
+        content_type, _ = mimetypes.guess_type(file_path)
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        headers = {'Content-Type': content_type or 'application/octet-stream'}
+        return Response(content, headers=headers)
+
+    def __call__(self, environ, start_response):
+        request = Request(environ)
+
+        # Apply middlewares (only process_request for simplicity)
+        for middleware_cls in self.middlewares:
+            middleware = middleware_cls(self)
+            middleware.process_request(request)
+
+        # Static files serving
+        if request.path.startswith('/static/'):
+            static_path = request.path[len('/static/'):]
+            response = self.serve_static(static_path)
+            start_response(response.get_status_string(), list(response.headers.items()))
+            return [response.body]
+
+        # Route matching
+        handler = None
+        for (route_path, methods) in self.routes:
+            if route_path == request.path and request.method in methods:
+                handler = self.routes[(route_path, methods)]
+                break
+
+        if handler is None:
+            response = Response('<h1>404 Not Found</h1>', status=404, headers={'Content-Type': 'text/html'})
+            start_response(response.get_status_string(), list(response.headers.items()))
+            return [response.body]
+
+        try:
+            result = handler(request)
+            if isinstance(result, Response):
+                response = result
+            else:
+                response = Response(result, headers={'Content-Type': 'text/html'})
+        except Exception as e:
+            response = Response(f'<h1>500 Internal Server Error</h1><p>{e}</p>', status=500, headers={'Content-Type': 'text/html'})
+
+        start_response(response.get_status_string(), list(response.headers.items()))
+        return [response.body]
+
+# Create directories and sample files for demonstration
+def setup_demo_files():
+    templates_dir = os.path.join(os.getcwd(), 'templates')
+    static_dir = os.path.join(os.getcwd(), 'static')
+    os.makedirs(templates_dir, exist_ok=True)
+    os.makedirs(static_dir, exist_ok=True)
+
+    index_template = """<html><head><title>Home</title></head><body><h1>Welcome, {{{{ user }}}}!</h1></body></html>"""
+    with open(os.path.join(templates_dir, 'index.html'), 'w', encoding='utf-8') as f:
+        f.write(index_template)
+
+    sample_static = "body { background-color: #f0f0f0; font-family: Arial; }"
+    with open(os.path.join(static_dir, 'style.css'), 'w', encoding='utf-8') as f:
+        f.write(sample_static)
+
+if __name__ == '__main__':
+    setup_demo_files()
+    app = StaticFramework()
+
+    @app.route('/')
+    def index(request):
+        user = request.query.get('user', ['Guest'])[0]
+        content = app.render_template('index.html', {'user': user})
+        return Response(content, headers={'Content-Type': 'text/html'})
+
+    @app.route('/hello', methods=['GET'])
+    def hello(request):
+        return '<h1>Hello from StaticFramework!</h1>'
+
+    # Add logging middleware
+    app.add_middleware(Middleware)
+
+    print("🚀 Complete Web Framework Starting...")
+    print("📁 Templates created in ./templates/")
+    print("🎨 Static files created in ./static/")
+    print("🌐 Server running on http://localhost:8000")
+    print("\nFeatures included:")
+    print("  ✅ WSGI Support")
+    print("  ✅ URL Routing")
+    print("  ✅ Request/Response Objects")
+    print("  ✅ Template Engine")
+    print("  ✅ Middleware Support")
+    print("  ✅ Static File Serving")
+    print("  ✅ Error Handling")
+
+    server = make_server('localhost', 8000, app)
+    server.serve_forever()

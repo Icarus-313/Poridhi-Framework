@@ -119,4 +119,3 @@ if __name__ == '__main__':
     server = make_server('localhost', 8000, app)
     print("Advanced framework running on http://localhost:8000")
     server.serve_forever()
-
